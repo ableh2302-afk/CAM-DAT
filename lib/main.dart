@@ -800,13 +800,34 @@ class _CameraHomePageState extends State<CameraHomePage> with WidgetsBindingObse
 
   Future<void> _processAndSave(String src, double ratio, String baseName, String? key) async {
     try {
-      final raw = await File(src).readAsBytes();
-      final bytes = await compute(_processPhotoJob, <String, dynamic>{'bytes': raw, 'ratio': ratio});
       final dir = await _photoDirectory();
       final target = await _uniqueFile(dir, baseName);
-      await target.writeAsBytes(bytes, flush: true);
       final fileName = target.path.split(Platform.pathSeparator).last;
-      await _saveToGallery(bytes, fileName);
+
+      // Jalur cepat: potong & simpan secara native (beberapa ratus ms).
+      var done = false;
+      if (Platform.isAndroid) {
+        try {
+          done = await _mediaStore.invokeMethod<bool>('processPhoto', <String, dynamic>{
+                'src': src,
+                'dest': target.path,
+                'displayName': fileName,
+                'relativePath': _folderPath,
+                'ratio': ratio,
+              }) ??
+              false;
+        } on PlatformException {
+          done = false;
+        }
+      }
+      // Cadangan bila jalur native gagal.
+      if (!done) {
+        final raw = await File(src).readAsBytes();
+        final bytes = await compute(_processPhotoJob, <String, dynamic>{'bytes': raw, 'ratio': ratio});
+        await target.writeAsBytes(bytes, flush: true);
+        await _saveToGallery(bytes, fileName);
+      }
+
       if (key != null) {
         _photoHistory.putIfAbsent(key, () => <String>[]).add(target.path);
         await _savePhotoHistory();
@@ -814,7 +835,12 @@ class _CameraHomePageState extends State<CameraHomePage> with WidgetsBindingObse
       try {
         await File(src).delete();
       } catch (_) {}
-      await _refreshPhotos();
+      if (mounted) {
+        setState(() {
+          _photos = [target, ..._photos];
+          _latestPhoto = target.path;
+        });
+      }
       _message('Tersimpan: $fileName');
     } catch (e) {
       _message('Gagal menyimpan foto: $e');
